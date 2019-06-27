@@ -1,0 +1,116 @@
+---
+title: "Lognormal race with unknown winner"
+author: "Bruno Nicenboim"
+date: "6/27/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = TRUE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+```
+
+```{r}
+set.seed(42)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = 3)
+```
+
+I'm here trying to simulate the outcome of two processes, one is the time-out (`to`) that goes down according to the practice law, and another one `proc` that depends on a predictor `X`. The two processes follow lognormal distributions with the same variance, and the fastest one is the observed one. Importantly, I can't know directly which is the one that finished first in each trial.
+
+```{r}
+N <- 5000
+X <- rnorm(N)
+Int_to <- log(1000) ##log(1000) = 6.9
+Int_proc <- 6
+r <- .0005
+#effect of something:
+mu_proc <- Int_proc + X *.1
+#practice:
+mu_to <- Int_to + -r*(1:N)
+sigma <- .5
+proc <- rlnorm(N,mu_proc,sigma)
+to <- rlnorm(N,mu_to,sigma)
+data <- tibble(trial=1:N,X, 
+               proc=proc, 
+               to=to, 
+               RT = pmin(proc, to), 
+               ## IRL, I don't know which one actually wins:
+               winner_proc = proc< to)
+```
+
+It will look like this (the crosses are the observations):
+```{r}
+data %>% gather(key="type",value="T", proc, to) %>%
+    ggplot( aes(x=trial, y=T, color = type)) + geom_point(alpha=.5) +
+    geom_point(aes(y=RT), size=2, color= "black", alpha=.1, shape =3)
+```
+
+This is the proportion of times `proc` won and was observed:
+```{r}
+mean(proc < to)
+mean(data$winner_proc)
+```
+
+Because these are two lognormal distributions, I can also calculate the proportions of the mixture like this, for every trial:
+```{r}
+plnorm(1, mu_proc - mu_to, sqrt(2) * sigma) %>% head()
+```
+
+And on average:
+```{r}
+plnorm(1, mu_proc - mu_to, sqrt(2) * sigma) %>% mean()
+```
+
+## Stan model of the race (a lognormal race model with an unknown winner)
+
+I try to fit this in stan with quite informative priors:
+
+```{r stan_code, tidy = TRUE, comment="", echo=FALSE}
+cat(readLines("race_proc.stan"), sep = "\n")  
+```
+
+```{r mixture, cache = TRUE, results = "hide"}
+data_simple <- as.list(data) %>% c(N=nrow(data))
+out_simple <- stan("race_proc.stan", data=data_simple, chains =6,iter=1000)
+```
+
+It doesn't work:
+```{r}
+print(out_simple, pars= c("Int_proc","Int_to","slope", "r", "sigma", "P_proc_avg"), probs = c(0.025,  0.50,  0.975))
+```
+
+It seems that there are a ton of modes, but they don't overlap with the correct true values of the parameters!
+```{r}
+traceplot(out_simple, pars= c("Int_proc","Int_to","slope", "r", "sigma", "P_proc_avg"))
+```
+
+These are the summaries of the individual chains, they are actually too precise:
+```{r}
+summary(out_simple,  pars= c("Int_proc","Int_to","slope", "r", "sigma", "P_proc_avg"), probs = c(0.025,  0.50,  0.975))
+```
+
+## Stan model of a lognormal race model, assuming I know the winner (which I don't)
+
+If I know which process is the fastest one, this is simply a lognormal race model, and it's quite easy to fit:
+
+
+```{r stan_code_known, tidy = TRUE, comment="", echo=FALSE}
+cat(readLines("race_proc_known.stan"), sep = "\n")  
+```
+
+```{r, cache = TRUE, results = "hide"}
+data_simple <- as.list(data) %>% c(N=nrow(data))
+out_simple_known <- stan("race_proc_known.stan", data=data_simple, chains =6,iter=1000)
+```
+
+It works, but I'm using data that I shouldn't have:
+```{r}
+print(out_simple_known, pars= c("Int_proc","Int_to","slope", "r", "sigma", "P_proc_avg"), probs = c(0.025,  0.50,  0.975))
+```
+
